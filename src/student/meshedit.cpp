@@ -264,8 +264,99 @@ std::optional<Halfedge_Mesh::VertexRef> Halfedge_Mesh::collapse_edge(Halfedge_Me
 */
 std::optional<Halfedge_Mesh::VertexRef> Halfedge_Mesh::collapse_face(Halfedge_Mesh::FaceRef f) {
     std::cout << __FUNCTION__ << std::endl;
-    (void)f;
-    return std::nullopt;
+
+    // To collapse the face, we need to delete one face and all vertices on the face.
+    // Create a new vertex to connect rest faces
+
+    auto h = f->halfedge();
+    auto v_new = this->new_vertex();
+    v_new->pos = f->center();
+
+    /*
+     * 1. The vertex is going to be deleted, make all half edge outgoing from this vertex to the
+     * new vertex
+     */
+    do {
+        auto v0 = h->vertex();
+
+        std::cout << h->id() << std::endl;
+
+        this->erase(v0);
+        // Do not change the vertex inside the face, we need use it later.
+        auto h_v0 = h->twin()->next();
+        do {
+            h_v0->vertex() = v_new;
+            h_v0 = h_v0->twin()->next();
+        } while(h_v0 != h);
+
+        h = h->next();
+    } while(h != f->halfedge());
+
+    /*
+     * 2. Deal with the face board on the edge which is going to be deleted,
+     *    each edge can only have one boarder face.
+     */
+    h = f->halfedge(); // Reset halfedge from beginning
+    do {
+        // Following elements need to be deleted
+        auto h_twin = h->twin();
+        auto e = h_twin->edge();
+        //        auto v0 = h->vertex();
+        this->erase(h);
+        this->erase(h_twin);
+        this->erase(e);
+        //        this->erase(v0);
+
+        auto f_0 = h_twin->face(); // get the face on that element
+
+        auto h_side_0 = h_twin->next();
+        auto h_side_twin_1 = h_side_0; // This half edge is the one before h_twin.
+        while(h_side_twin_1->next() != h_twin) {
+            h_side_twin_1 = h_side_twin_1->next();
+        }
+
+        // Check is it a triangle
+        if(h_side_0->next() == h_side_twin_1) {
+            // This is a triangle, it will merged to an edge
+
+            auto e_0 = h_side_0->edge();
+            auto h_side_twin_0 = h_side_0->twin();
+            auto h_side_twin_0_n = h_side_twin_0->next(); // The half edge next to h_side_twin_0
+            auto h_side_twin_0_p = h_side_twin_0_n;       // The half edge before h_side_twin_0
+            while(h_side_twin_0_p->next() != h_side_twin_0) {
+                h_side_twin_0_p = h_side_twin_0_p->next();
+            }
+            auto f_1 = h_side_twin_0->face();
+            auto v_1 = h_side_twin_0->vertex();
+
+            // Close the loop
+            h_side_twin_1->next() = h_side_twin_0_n;
+            h_side_twin_0_p->next() = h_side_twin_1;
+
+            // Associate proper elements
+            h_side_twin_1->face() = h_side_twin_0_n->face();
+            h_side_twin_0_n->vertex() = v_new;
+            v_new->halfedge() = h_side_twin_0_n;
+            if(f_1->halfedge() == h_side_twin_0) f_1->halfedge() = h_side_twin_0_n;
+            if(v_1->halfedge() == h_side_twin_0) v_1->halfedge() = h_side_twin_1;
+
+            this->erase(f_0);
+            this->erase(e_0);
+            this->erase(h_side_0);
+            this->erase(h_side_twin_0);
+        } else {
+            // If is not a triangle, just make it is a valid loop
+            h_side_twin_1->next() = h_side_0;
+            // Reassigne the elements
+            v_new->halfedge() = h_side_0;
+            if(f_0->halfedge() == h_twin) f_0->halfedge() = h_side_0;
+        }
+
+        h = h->next();
+    } while(h != f->halfedge());
+
+    this->erase(f);
+    return v_new;
 }
 
 /*
@@ -628,12 +719,75 @@ std::optional<Halfedge_Mesh::FaceRef> Halfedge_Mesh::bevel_edge(Halfedge_Mesh::E
     implement!)
 */
 std::optional<Halfedge_Mesh::FaceRef> Halfedge_Mesh::bevel_face(Halfedge_Mesh::FaceRef f) {
+    std::cout << __FUNCTION__ << std::endl;
 
     // Reminder: You should set the positions of new vertices (v->pos) to be exactly
     // the same as wherever they "started from."
 
-    (void)f;
-    return std::nullopt;
+    std::vector<FaceRef> fs;
+    std::vector<EdgeRef> es;
+    std::vector<EdgeRef> e_sides;
+    std::vector<VertexRef> vs;
+    std::vector<HalfedgeRef> hs;
+    std::vector<HalfedgeRef> h_twins;
+    std::vector<HalfedgeRef> h_sides;
+    std::vector<HalfedgeRef> h_side_twins;
+
+    auto new_face = this->new_face();
+
+    auto h = f->halfedge();
+
+    // for loop the halfedges in the face, and allocate the memory before any operation
+    do {
+        fs.push_back(this->new_face());
+        es.push_back(this->new_edge());
+        e_sides.push_back(this->new_edge());
+        vs.push_back(this->new_vertex());
+        hs.push_back(this->new_halfedge());
+        h_twins.push_back(this->new_halfedge());
+        h_sides.push_back(this->new_halfedge());
+        h_side_twins.push_back(this->new_halfedge());
+        h = h->next();
+    } while(h != f->halfedge());
+
+    // Set proper connectivity
+    h = f->halfedge();
+    for(int i = 0; i < fs.size(); ++i) {
+        auto h_next = h->next();
+
+        auto h_new = hs[i];
+        auto h_new_twin = h_twins[i];
+        auto e_new = es[i];
+        auto e_0 = e_sides[i];
+        auto e_1 = e_sides[(i + 1) % e_sides.size()];
+        auto v_0 = vs[i];
+        auto v_1 = vs[(i + 1) % vs.size()];
+        auto f_0 = fs[i];
+        auto h_side_0 = h_sides[i];
+        auto h_side_twin_0 = h_side_twins[i];
+        auto h_side_1 = h_sides[(i + 1) % h_sides.size()];
+        auto h_side_twin_1 = h_side_twins[(i + 1) % h_side_twins.size()];
+
+        // Associate all elements
+        h->set_neighbors(h_side_twin_1, h->twin(), h->vertex(), h->edge(), f_0);
+        h_side_twin_1->set_neighbors(h_new_twin, h_side_1, h_next->vertex(), e_1, f_0);
+        h_new_twin->set_neighbors(h_side_0, h_new, v_1, e_new, f_0);
+        h_side_0->set_neighbors(h, h_side_twin_0, v_0, e_0, f_0);
+        h_new->set_neighbors(hs[(i + 1) % hs.size()], h_new_twin, v_0, e_new, new_face);
+
+        v_0->halfedge() = h_new;
+        v_0->pos = h->vertex()->pos;
+        e_0->halfedge() = h_side_0;
+        e_new->halfedge() = h_new;
+        f_0->halfedge() = h;
+
+        h = h_next;
+    }
+
+    this->erase(f);
+    new_face->halfedge() = hs[0];
+
+    return new_face;
 }
 
 /*
@@ -737,6 +891,8 @@ void Halfedge_Mesh::bevel_face_positions(const std::vector<Vec3>& start_position
                                          Halfedge_Mesh::FaceRef face, float tangent_offset,
                                          float normal_offset) {
 
+    std::cout << __FUNCTION__ << std::endl;
+
     if(flip_orientation) normal_offset = -normal_offset;
     std::vector<HalfedgeRef> new_halfedges;
     auto h = face->halfedge();
@@ -745,11 +901,15 @@ void Halfedge_Mesh::bevel_face_positions(const std::vector<Vec3>& start_position
         h = h->next();
     } while(h != face->halfedge());
 
-    (void)new_halfedges;
-    (void)start_positions;
-    (void)face;
-    (void)tangent_offset;
-    (void)normal_offset;
+    Vec3 f_center = face->center();
+    Vec3 f_normal = face->normal();
+
+    for(int i = 0; i < new_halfedges.size(); ++i) {
+        h = new_halfedges[i];
+        auto v_0 = h->vertex();
+        Vec3 dir = (f_center - start_positions[i]).normalize();
+        v_0->pos = start_positions[i] + dir * tangent_offset - f_normal * normal_offset;
+    }
 }
 
 /*
